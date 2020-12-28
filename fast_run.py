@@ -8,6 +8,7 @@ import cv2
 from fast_run_utils import *
 from pathlib import Path
 import time
+import argparse
 
 
 def mask_thresh(splited_image, hw, metric, threshold) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -15,22 +16,32 @@ def mask_thresh(splited_image, hw, metric, threshold) -> Tuple[torch.Tensor, tor
   h, w = hw
   splited_image = splited_image.reshape((h * w, *splited_image.shape[2:]))
   metric = torch.flatten(metric)
-  true_idx = torch.flatten(torch.nonzero(metric > threshold))
-  false_idx = torch.flatten(torch.nonzero(~(metric > threshold)))
+  true_idx = torch.flatten(torch.nonzero(metric > threshold, as_tuple=False))
+  false_idx = torch.flatten(torch.nonzero(~(metric > threshold), as_tuple=False))
 
   true_im = splited_image[true_idx]
   false_im = splited_image[false_idx]
   return true_idx, true_im, false_idx, false_im
 
 
-def mask_inverse(true_idx, true_im, false_idx, false_im, hw) -> torch.Tensor:
-  splited_im = torch.cat((true_im, false_im), 0)
-  idx = torch.cat((true_idx, false_idx), 0)
+def mask_inverse(true_idx: torch.Tensor, true_im: torch.Tensor, false_idx, false_im, hw) -> torch.Tensor:
+  if true_im.numel() == 0:
+    splited_im = false_im
+    idx = false_idx
+  elif false_im.numel() == 0:
+    splited_im = true_im
+    idx = true_idx
+  else:
+    splited_im = torch.cat((true_im, false_im), 0)
+    idx = torch.cat((true_idx, false_idx), 0)
+
   splited_im = splited_im[torch.argsort(idx)]
   return splited_im.view((*hw, *splited_im.shape[1:]))
 
 
-def main():
+def main(video='/home/zqh/Videos/newland.flv', weights='./fsrcnn_x2.pth',
+         threshold=120, stride=40, scale=2,
+         orginal_method: bool = False):
 
   if torch.cuda.is_available():
     device = torch.device('cuda')
@@ -38,14 +49,11 @@ def main():
     device = torch.device('cpu')
 
   model = FSRCNN(2)
-  model.load_state_dict(torch.load('./fsrcnn_x2.pth'))
+  model.load_state_dict(torch.load(weights))
   model = model.eval().to(device)
 
-  threshold = 120
-  stride = 40
   ptv = PatchTotalVariation()
-  g, length, fps, height, width = get_read_stream(Path('/home/zqh/Videos/newland.flv'))
-  scale = 2
+  g, length, fps, height, width = get_read_stream(Path(video))
   plt.ion()
   fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(6, 9))
   title = plt.title('fps:')
@@ -61,32 +69,58 @@ def main():
   plt.tight_layout()
   plt.show()
   for im in g:
+    orginal_rgb = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+    if orginal_method:
+      hr_rgb = cv2.resize(orginal_rgb, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+      ycrcb = cv2.cvtColor(orginal_rgb, cv2.COLOR_RGB2YCrCb)
+      hr_ycrcb = cv2.cvtColor(hr_rgb, cv2.COLOR_RGB2YCrCb)
+      im = torch.ByteTensor(ycrcb[..., 0:1]).to(device)
+    else:
+      im = torch.ByteTensor(cv2.cvtColor(im, cv2.COLOR_BGR2RGB)).to(device)
+    channel = im.shape[-1]
+
     start_time = time.time()
-    # im=next(g)
-    im = torch.ByteTensor(cv2.cvtColor(im, cv2.COLOR_BGR2RGB)).to(device)
     # F.interpolate(im.permute((2, 1, 0))[None,...], scale_factor=0.5)[0].permute((1, 2, 0))
     split_im, hw = window_split(im, stride)
     split_tv = ptv(split_im)
     true_idx, true_im, false_idx, false_im = mask_thresh(split_im, hw, split_tv, threshold)
 
     # NOTE this model only accpect channel==1, so need reshape
-    true_im = (model(true_im.reshape(-1, 1, *true_im.shape[2:]) / 255.) * 255.)
-    true_im = true_im.byte().reshape((-1, 3, *true_im.shape[2:]))
+    if true_im.numel() > 0:
+      true_im = (model(true_im.reshape(-1, 1, *true_im.shape[2:]) / 255.) * 255.)
+      true_im = true_im.byte().reshape((-1, channel, *true_im.shape[2:]))
     # fast interpolate for false_im
-    false_im = F.interpolate(false_im.float(), scale_factor=2, mode='bilinear').byte()
+    if false_im.numel() > 0:
+      false_im = F.interpolate(false_im.float(),
+                               scale_factor=2,
+                               mode='bilinear',
+                               align_corners=False).byte()
 
     # merge image
     processed_im = mask_inverse(true_idx, true_im, false_idx, false_im, hw)
 
     new_im = window_merge(processed_im, hw, stride, scale)
 
-    ax1im.set_data(im.detach().to('cpu').numpy())
+    ax1im.set_data(orginal_rgb)
     ax2im.set_data(split_tv.detach().to('cpu').numpy())
-    ax3im.set_data(new_im.detach().to('cpu').numpy())
+
+    if orginal_method:
+      new_ycrcb = np.concatenate((new_im.detach().to('cpu').numpy(), hr_ycrcb[..., 1:]), -1)
+      ax3im.set_data(cv2.cvtColor(new_ycrcb, cv2.COLOR_YCrCb2RGB))
+    else:
+      ax3im.set_data(new_im.detach().to('cpu').numpy())
     title.set_text(f'fps: {1.0 / (time.time() - start_time):.3f}')
     # plt.pcolor
     fig.canvas.flush_events()
 
 
 if __name__ == "__main__":
-  main()
+  parser = argparse.ArgumentParser()
+  parser.add_argument("--video", type=str, default='/home/zqh/Videos/newland.flv')
+  parser.add_argument("--weights", type=str, default='./fsrcnn_x2.pth')
+  parser.add_argument("--threshold", type=int, default=120)
+  parser.add_argument("--stride", type=int, default=40)
+  parser.add_argument("--scale", type=int, default=2)
+  parser.add_argument("--orginal_method", action="store_true", help="add --orginal_method to enable orginal forward mode")
+  args = parser.parse_args()
+  main(args.video, args.weights, args.threshold, args.stride, args.scale, args.orginal_method)

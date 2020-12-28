@@ -33,7 +33,7 @@ def window_split(image: torch.Tensor, stride: int) -> Tuple[torch.Tensor, torch.
 def window_merge(image: torch.Tensor, hw, stride, scale):
   h, w = hw
   image = image.permute((0, 3, 1, 4, 2))
-  image = image.reshape((h * stride * scale, w * stride * scale, 3))
+  image = image.reshape((h * stride * scale, w * stride * scale, image.shape[-1]))
   return image
 
 
