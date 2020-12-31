@@ -50,7 +50,7 @@ def main(video='/home/zqh/Videos/newland.flv', weights='./fsrcnn_x2.pth',
   else:
     device = torch.device('cpu')
 
-  model = FSRCNN(2)
+  model = FSRCNN(scale)
   model.load_state_dict(torch.load(weights))
   model = model.eval().to(device)
 
@@ -58,8 +58,9 @@ def main(video='/home/zqh/Videos/newland.flv', weights='./fsrcnn_x2.pth',
   video = Path(video)
   g, length, fps, height, width = get_read_stream(video)
   print(f"Video info: \nheight: {height} width:{width} length:{length} fps:{fps}")
+  print(f"Runing info: \nthreshold: {threshold} stride:{stride} scale:{scale} orginal_method:{orginal_method}")
   if export:
-    video_export = video.parent / (video.stem + '_out' + '.mp4')
+    video_export = video.parent / (video.stem + f'_{scale}x_out' + '.mp4')
     writer = get_writer_stream(video_export, fps, height * scale, width * scale)
 
   plt.ion()
@@ -106,7 +107,7 @@ def main(video='/home/zqh/Videos/newland.flv', weights='./fsrcnn_x2.pth',
     # fast interpolate for false_im
     if false_im.numel() > 0:
       false_im = F.interpolate(false_im,
-                               scale_factor=2,
+                               scale_factor=scale,
                                mode='bilinear',
                                align_corners=False)
     # merge image
